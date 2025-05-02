@@ -1,12 +1,14 @@
 {
-  "name": "web-app",
+  "name": "gestor-de-cliente",
   "type": "module",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
+  "description": "Sistema de gestión de clientes con React y Tailwind",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "vercel-build": "vite build"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.0.5",
