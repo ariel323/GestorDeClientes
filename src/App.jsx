@@ -23,13 +23,81 @@ import {
   Upload,
   Download,
   BarChart2,
-  Tags, 
+  Tags,
   MessageSquarePlus,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { cn } from "@/lib/utils";
 
 const AVAILABLE_TAGS = ["Nuevo", "Activo", "Inactivo"];
+
+const normalize = (str) => str?.toLowerCase().replace(/\s|_/g, "") || "";
+
+const CLIENT_FIELDS = [
+  "firstName",
+  "lastName",
+  "email",
+  "phone",
+  "company",
+  "address",
+  "province",
+  "taxId",
+  "dni",
+  "location",
+  "tags",
+  "notes",
+];
+
+const FIELD_ALIASES = {
+  firstname: "firstName",
+  nombre: "firstName",
+  lastname: "lastName",
+  apellido: "lastName",
+  correo: "email",
+  mail: "email",
+  telefono: "phone",
+  celular: "phone",
+  empresa: "company",
+  direccion: "address",
+  provincia: "province",
+  cuil: "taxId",
+  cuit: "taxId",
+  dni: "dni",
+  ubicacion: "location",
+  tags: "tags",
+  etiquetas: "tags",
+  notas: "notes",
+};
+
+const mapExcelRowToClient = (row) => {
+  const client = { id: Date.now() + Math.random(), tags: [], notes: [] };
+  Object.entries(row).forEach(([key, value]) => {
+    const normKey = normalize(key);
+    let field = CLIENT_FIELDS.find((f) => normalize(f) === normKey);
+    if (!field && FIELD_ALIASES[normKey]) {
+      field = FIELD_ALIASES[normKey];
+    }
+    if (field) {
+      if (field === "tags") {
+        client.tags = value ? value.split(",").map((t) => t.trim()) : [];
+      } else if (field === "notes") {
+        client.notes = value
+          ? value.split(";").map((note) => ({
+              id: Date.now() + Math.random(),
+              content: note.trim(),
+              date: new Date().toISOString(),
+            }))
+          : [];
+      } else {
+        client[field] = value || "";
+      }
+    } else {
+      // Si el campo no existe, lo agrega como extra
+      client[key] = value;
+    }
+  });
+  return client;
+};
 
 function App() {
   const [clients, setClients] = useState([]);
@@ -57,6 +125,10 @@ function App() {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const { toast } = useToast();
   const fileInputRef = useRef(null);
+  const [mappingDialogOpen, setMappingDialogOpen] = useState(false);
+  const [excelColumns, setExcelColumns] = useState([]);
+  const [columnMapping, setColumnMapping] = useState({});
+  const [pendingExcelRows, setPendingExcelRows] = useState([]);
 
   useEffect(() => {
     const savedClients = localStorage.getItem("clients");
@@ -189,34 +261,57 @@ function App() {
         const worksheet = workbook.Sheets[sheetName];
         const jsonData = XLSX.utils.sheet_to_json(worksheet);
 
-        const newClients = jsonData.map((row) => ({
-          id: Date.now() + Math.random(),
-          firstName: row.firstName || row.FirstName || "",
-          lastName: row.lastName || row.LastName || "",
-          email: row.email || row.Email || "",
-          phone: row.phone || row.Phone || "",
-          company: row.company || row.Company || "",
-          address: row.address || row.Address || "",
-          province: row.province || row.Province || "",
-          taxId: row.taxId || row.TaxId || row.CUIL || "",
-          dni: row.dni || row.DNI || "",
-          location: row.location || row.Location || "",
-          // Convertir string de tags a array
-          tags: row.tags ? row.tags.split(",").map((tag) => tag.trim()) : [],
-          notes: row.notes
-            ? row.notes.split(";").map((note) => ({
-                id: Date.now() + Math.random(),
-                content: note.trim(),
-                date: new Date().toISOString(),
-              }))
-            : [],
-        }));
+        if (jsonData.length === 0) return;
 
-        setClients((prevClients) => [...prevClients, ...newClients]);
-        toast({
-          title: "Datos importados",
-          description: `Se importaron ${newClients.length} clientes exitosamente`,
-        });
+        // Detectar columnas del Excel
+        const columns = Object.keys(jsonData[0]);
+        setExcelColumns(columns);
+
+        // Cargar mapeo guardado si existe
+        const savedMapping = JSON.parse(
+          localStorage.getItem("excelColumnMapping") || "{}"
+        );
+
+        // Detectar columnas no mapeadas ni alias
+        const unknownColumns = columns.filter(
+          (col) =>
+            !CLIENT_FIELDS.includes(savedMapping[col]) &&
+            !CLIENT_FIELDS.includes(col) &&
+            !Object.keys(FIELD_ALIASES).includes(normalize(col)) &&
+            !savedMapping[col]
+        );
+
+        if (unknownColumns.length > 0) {
+          setPendingExcelRows(jsonData);
+          setColumnMapping(savedMapping);
+          setMappingDialogOpen(true);
+        } else {
+          // Aplica el mapeo guardado y los aliases a cada fila
+          const newClients = jsonData.map((row) => {
+            const mappedRow = {};
+            Object.entries(row).forEach(([key, value]) => {
+              // 1. Usa mapeo guardado si existe
+              let mappedKey = savedMapping[key];
+              // 2. Si no, usa alias si existe
+              if (!mappedKey) {
+                const normKey = normalize(key);
+                mappedKey = FIELD_ALIASES[normKey] || key;
+              }
+              mappedRow[mappedKey] = value;
+            });
+            return mapExcelRowToClient(mappedRow);
+          });
+
+          setClients((prevClients) => {
+            const updated = [...prevClients, ...newClients];
+            console.log("Clientes después de importar:", updated);
+            return updated;
+          });
+          toast({
+            title: "Datos importados",
+            description: `Se importaron ${newClients.length} clientes exitosamente`,
+          });
+        }
       } catch (error) {
         console.error("Error al importar:", error);
         toast({
@@ -257,6 +352,31 @@ function App() {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Clientes");
     XLSX.writeFile(workbook, "clientes.xlsx");
+  };
+
+  const handleMappingSave = () => {
+    // Guardar el mapeo en localStorage
+    localStorage.setItem("excelColumnMapping", JSON.stringify(columnMapping));
+    // Procesar los datos pendientes usando el mapeo
+    const mappedRows = pendingExcelRows.map((row) => {
+      const mappedRow = {};
+      Object.entries(row).forEach(([key, value]) => {
+        const mappedKey = columnMapping[key] || key;
+        mappedRow[mappedKey] = value;
+      });
+      return mapExcelRowToClient(mappedRow);
+    });
+    setClients((prevClients) => {
+      const updated = [...prevClients, ...mappedRows];
+      console.log("Clientes después de importar:", updated);
+      return updated;
+    });
+    setMappingDialogOpen(false);
+    setPendingExcelRows([]);
+    toast({
+      title: "Datos importados",
+      description: `Se importaron ${mappedRows.length} clientes exitosamente`,
+    });
   };
 
   const toggleTag = (tag, client) => {
@@ -301,14 +421,14 @@ function App() {
 
         <div className="bg-white rounded-lg shadow-lg p-6 mb-8">
           <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mb-6">
-            <div className="relative flex-1">
+            <div className="relative flex-1 min-w-[250px] max-w-xl">
               <Search className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
               <Input
                 type="text"
                 placeholder="Buscar clientes..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-10"
+                className="pl-10 w-full"
               />
             </div>
             <div className="flex flex-wrap gap-2">
@@ -347,6 +467,18 @@ function App() {
               >
                 <Download className="mr-2 h-4 w-4" />
                 Exportar Excel
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  localStorage.removeItem("excelColumnMapping");
+                  toast({
+                    title: "Mapeo limpiado",
+                    description: "El mapeo guardado fue eliminado.",
+                  });
+                }}
+              >
+                Limpiar mapeo de Excel
               </Button>
               <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
                 <DialogTrigger asChild>
@@ -757,6 +889,47 @@ function App() {
           )}
         </DialogContent>
       </Dialog>
+
+      <Dialog open={mappingDialogOpen} onOpenChange={setMappingDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Mapeo de columnas</DialogTitle>
+            <DialogDescription>
+              Asocia las columnas del Excel con los campos del sistema.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            {excelColumns.map((col) => (
+              <div key={col} className="flex items-center gap-2">
+                <Label className="w-32">{col}</Label>
+                <select
+                  className="border rounded px-2 py-1 flex-1"
+                  value={columnMapping[col] || ""}
+                  onChange={(e) =>
+                    setColumnMapping((prev) => ({
+                      ...prev,
+                      [col]: e.target.value,
+                    }))
+                  }
+                >
+                  <option value="">Ignorar</option>
+                  {CLIENT_FIELDS.map((field) => (
+                    <option key={field} value={field}>
+                      {field}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button onClick={handleMappingSave}>
+              Guardar mapeo e importar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Toaster />
     </div>
   );
